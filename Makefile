@@ -12,14 +12,14 @@ define Package/luci-app-drcom-auth
   SECTION:=luci
   CATEGORY:=LuCI
   SUBMENU:=3. Applications
-  TITLE:=Drcom 校园网自动认证 LuCI 应用
+  TITLE:=Drcom campus network auto authentication LuCI app
   PKGARCH:=all
   DEPENDS:=+luci-compat +curl
 endef
 
 define Package/luci-app-drcom-auth/description
-  面向 OpenWrt/iStoreOS 的校园网 Drcom/ePortal 自动认证插件。
-  提供自动重连、UCI 配置和 LuCI 状态页面。
+  Drcom/ePortal auto authentication app for OpenWrt and iStoreOS.
+  Provides UCI configuration, LuCI pages, and reconnect automation.
 endef
 
 define Build/Compile

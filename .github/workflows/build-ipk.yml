@@ -35,10 +35,10 @@ jobs:
         run: |
           set -eux
           mkdir -p sdk/package/luci-app-drcom-auth
-          cp -a "$GITHUB_WORKSPACE"/. "sdk/package/luci-app-drcom-auth/"
+          git -C "$GITHUB_WORKSPACE" archive --format=tar HEAD | tar -xf - -C "sdk/package/luci-app-drcom-auth"
           cd sdk
           ./scripts/feeds update -a
-          ./scripts/feeds install -a
+          ./scripts/feeds install luci-compat
           make defconfig
           make package/luci-app-drcom-auth/compile V=s
 
