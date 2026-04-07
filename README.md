@@ -4,14 +4,13 @@
 [![Release](https://img.shields.io/github/v/release/ChaosJulien/luci-app-drcom-auth?include_prereleases)](https://github.com/ChaosJulien/luci-app-drcom-auth/releases)
 [![License: GPL-2.0-or-later](https://img.shields.io/badge/license-GPL--2.0--or--later-blue.svg)](LICENSE)
 
-基于 OpenWrt / iStoreOS 的校园网 Drcom 自动认证插件，支持掉线自动恢复、LuCI 图形化管理和中文日志。
+基于 OpenWrt / iStoreOS 的校园网 Drcom 自动认证插件，支持掉线自动恢复、LuCI 图形化管理。
 
 ## 功能
 
 - 自动检测校园网认证状态并恢复网络
 - 支持先解绑再登录，适配 Drcom / ePortal 场景
 - LuCI 页面查看状态、日志，执行启动、停止、重启和立即检测
-- 中文日志，便于排查
 - UCI 配置，适合 OpenWrt 打包与维护
 
 ## 一键构建
