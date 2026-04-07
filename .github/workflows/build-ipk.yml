@@ -22,7 +22,7 @@ jobs:
             sdk_url: https://downloads.openwrt.org/releases/22.03.7/targets/x86/64/openwrt-sdk-22.03.7-x86-64_gcc-11.2.0_musl.Linux-x86_64.tar.xz
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Prepare SDK
         run: |
@@ -34,7 +34,8 @@ jobs:
       - name: Build package
         run: |
           set -eux
-          cp -r "$GITHUB_WORKSPACE" "sdk/package/luci-app-drcom-auth"
+          mkdir -p sdk/package/luci-app-drcom-auth
+          cp -a "$GITHUB_WORKSPACE"/. "sdk/package/luci-app-drcom-auth/"
           cd sdk
           ./scripts/feeds update -a
           ./scripts/feeds install -a
