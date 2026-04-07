@@ -1,0 +1,50 @@
+<%+header%>
+<h2>校园网认证</h2>
+
+<div class="cbi-map">
+	<div class="cbi-section">
+		<table class="table">
+			<tr><td width="180">服务状态</td><td><%=pcdata(service or "unknown")%></td></tr>
+			<tr><td>进程</td><td><pre><%=pcdata(ps or "")%></pre></td></tr>
+			<tr><td>WAN IP</td><td><%=pcdata(wan_ip or "")%></td></tr>
+			<tr><td>WAN MAC</td><td><%=pcdata(wan_mac or "")%></td></tr>
+			<tr><td>网关连通性</td><td><%=pcdata(gateway or "")%></td></tr>
+		</table>
+	</div>
+
+	<div class="cbi-section">
+		<div class="right">
+			<form method="post" action="<%=url('admin/services/drcom_auth/action')%>" style="display:inline">
+				<input type="hidden" name="do" value="start" />
+				<input class="btn cbi-button cbi-button-apply" type="submit" value="启动服务" />
+			</form>
+			<form method="post" action="<%=url('admin/services/drcom_auth/action')%>" style="display:inline">
+				<input type="hidden" name="do" value="stop" />
+				<input class="btn cbi-button cbi-button-reset" type="submit" value="停止服务" />
+			</form>
+			<form method="post" action="<%=url('admin/services/drcom_auth/action')%>" style="display:inline">
+				<input type="hidden" name="do" value="restart" />
+				<input class="btn cbi-button cbi-button-save" type="submit" value="重启服务" />
+			</form>
+			<form method="post" action="<%=url('admin/services/drcom_auth/action')%>" style="display:inline">
+				<input type="hidden" name="do" value="once" />
+				<input class="btn cbi-button cbi-button-apply" type="submit" value="立即检测一次" />
+			</form>
+			<form method="post" action="<%=url('admin/services/drcom_auth/action')%>" style="display:inline">
+				<input type="hidden" name="do" value="test" />
+				<input class="btn cbi-button" type="submit" value="运行自检" />
+			</form>
+			<form method="post" action="<%=url('admin/services/drcom_auth/action')%>" style="display:inline">
+				<input type="hidden" name="do" value="print" />
+				<input class="btn cbi-button" type="submit" value="显示请求 URL" />
+			</form>
+		</div>
+	</div>
+
+	<div class="cbi-section">
+		<h3>最近日志</h3>
+		<pre style="white-space:pre-wrap; max-height:500px; overflow:auto;"><%=pcdata(logs or "")%></pre>
+	</div>
+</div>
+
+<%+footer%>
