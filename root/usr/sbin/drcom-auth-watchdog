@@ -2,305 +2,452 @@
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 PROG="drcom-auth-watchdog"
-LOG_TAG="drcom-auth-watchdog"
 LOCKDIR="/var/run/${PROG}.lock"
-FETCHER=""
+STATEFILE="/var/run/${PROG}.state"
 CONFIG_FILE="/etc/config/drcom-auth"
 
-log() {
-	logger -t "$LOG_TAG" "$*"
+log() { logger -t "$PROG" "$*"; }
+err() { logger -p daemon.err -t "$PROG" "$*"; }
+
+cleanup_lock() {
+    [ -d "$LOCKDIR" ] && rmdir "$LOCKDIR" 2>/dev/null
 }
 
-rand_v() {
-	date +%s | tail -c 5
+acquire_lock() {
+    if mkdir "$LOCKDIR" 2>/dev/null; then
+        echo $$ > "$LOCKDIR/pid"
+        trap 'cleanup_lock; exit 0' INT TERM EXIT
+        return 0
+    fi
+
+    if [ -f "$LOCKDIR/pid" ]; then
+        oldpid="$(cat "$LOCKDIR/pid" 2>/dev/null)"
+        if [ -n "$oldpid" ] && kill -0 "$oldpid" 2>/dev/null; then
+            err "[boot] 已有实例正在运行"
+            return 1
+        fi
+    fi
+
+    rm -rf "$LOCKDIR" 2>/dev/null
+    mkdir "$LOCKDIR" 2>/dev/null || { err "[boot] 无法创建锁目录"; return 1; }
+    echo $$ > "$LOCKDIR/pid"
+    trap 'cleanup_lock; exit 0' INT TERM EXIT
+    return 0
 }
 
-fetch_cmd() {
-	if command -v curl >/dev/null 2>&1; then
-		echo curl
-	elif command -v uclient-fetch >/dev/null 2>&1; then
-		echo uclient-fetch
-	elif command -v wget >/dev/null 2>&1; then
-		echo wget
-	else
-		return 1
-	fi
-}
-
-fetch_text() {
-	url="$1"
-	case "$FETCHER" in
-		curl) curl -fsL --max-time "$CHECK_TIMEOUT" "$url" 2>/dev/null ;;
-		uclient-fetch) uclient-fetch -qO- --timeout="$CHECK_TIMEOUT" "$url" 2>/dev/null ;;
-		wget) wget -qO- --timeout="$CHECK_TIMEOUT" "$url" 2>/dev/null ;;
-		*) return 1 ;;
-	esac
-}
-
-http_code() {
-	url="$1"
-	case "$FETCHER" in
-		curl) curl -fsL -o /dev/null -w "%{http_code}" --max-time "$CHECK_TIMEOUT" "$url" 2>/dev/null ;;
-		uclient-fetch)
-			out="$(uclient-fetch -S -O /dev/null --timeout="$CHECK_TIMEOUT" "$url" 2>&1)"
-			printf "%s" "$out" | sed -n 's/.*HTTP\/[0-9.]* \([0-9][0-9][0-9]\).*/\1/p' | tail -n1
-			;;
-		wget)
-			out="$(wget -S -O /dev/null --timeout="$CHECK_TIMEOUT" "$url" 2>&1)"
-			printf "%s" "$out" | sed -n 's/.* \([0-9][0-9][0-9]\) .*/\1/p' | tail -n1
-			;;
-		*) return 1 ;;
-	esac
-}
-
-urlencode() {
-	# enough for current ascii credentials
-	printf '%s' "$1" | sed \
-		-e 's/%/%25/g' \
-		-e 's/ /%20/g' \
-		-e 's/#/%23/g' \
-		-e 's/&/%26/g' \
-		-e 's/+/%2B/g' \
-		-e 's/?/%3F/g' \
-		-e 's/@/%40/g'
-}
-
-get_if_mac() {
-	cat "/sys/class/net/$AUTH_IF/address" 2>/dev/null | tr '[:lower:]' '[:upper:]' | tr -d ':'
-}
-
-get_if_ipv4() {
-	ip -4 addr show "$AUTH_IF" 2>/dev/null | awk '/inet / {print $2}' | cut -d/ -f1 | head -n1
-}
-
-ip_to_int() {
-	local ip="$1" a b c d
-	IFS=. read -r a b c d <<EOF
-$ip
-EOF
-	echo $((a * 256 * 256 * 256 + b * 256 * 256 + c * 256 + d))
+STATE_LAST_STATUS=""
+STATE_LAST_MESSAGE=""
+write_state() {
+    [ "$1" = "$STATE_LAST_STATUS" ] && [ "$2" = "$STATE_LAST_MESSAGE" ] && return 0
+    STATE_LAST_STATUS="$1"
+    STATE_LAST_MESSAGE="$2"
+    {
+        echo "last_time=$(date '+%Y-%m-%d %H:%M:%S')"
+        echo "last_status=$1"
+        echo "last_message=$2"
+    } > "$STATEFILE.tmp" 2>/dev/null
+    mv "$STATEFILE.tmp" "$STATEFILE" 2>/dev/null
 }
 
 load_config() {
-	[ -f "$CONFIG_FILE" ] || return 1
+    [ -f "$CONFIG_FILE" ] || { err "[boot] 配置文件不存在 path=$CONFIG_FILE"; return 1; }
 
-	enabled="$(uci -q get drcom-auth.main.enabled)"
-	AUTH_IF="$(uci -q get drcom-auth.main.auth_if)"
-	WAN_MAC="$(uci -q get drcom-auth.main.wan_mac)"
-	GATEWAY_HOST="$(uci -q get drcom-auth.main.gateway_host)"
-	LOGIN_URL="$(uci -q get drcom-auth.main.login_url)"
-	UNBIND_URL="$(uci -q get drcom-auth.main.unbind_url)"
-	USERNAME="$(uci -q get drcom-auth.main.username)"
-	PASSWORD="$(uci -q get drcom-auth.main.password)"
-	MKKEY="$(uci -q get drcom-auth.main.mkkey)"
-	CHECK_HTTP_URL="$(uci -q get drcom-auth.main.check_http_url)"
-	CHECK_HTTP_URL_2="$(uci -q get drcom-auth.main.check_http_url_2)"
-	HTTP_STRICT_204="$(uci -q get drcom-auth.main.http_strict_204)"
-	SUCCESS_INTERVAL="$(uci -q get drcom-auth.main.success_interval)"
-	FAIL_CONFIRM_DELAY="$(uci -q get drcom-auth.main.fail_confirm_delay)"
-	UNBIND_DELAY="$(uci -q get drcom-auth.main.unbind_delay)"
-	LOGIN_DELAY="$(uci -q get drcom-auth.main.login_delay)"
-	MAX_BACKOFF="$(uci -q get drcom-auth.main.max_backoff)"
-	TERMINAL_TYPE="$(uci -q get drcom-auth.main.terminal_type)"
-	JS_VERSION="$(uci -q get drcom-auth.main.js_version)"
-	LANG_PRIMARY="$(uci -q get drcom-auth.main.lang_primary)"
-	LANG_SECONDARY="$(uci -q get drcom-auth.main.lang_secondary)"
-	R1="$(uci -q get drcom-auth.main.r1)"
-	R2="$(uci -q get drcom-auth.main.r2)"
-	R3="$(uci -q get drcom-auth.main.r3)"
-	R6="$(uci -q get drcom-auth.main.r6)"
-	PARA="$(uci -q get drcom-auth.main.para)"
-	V6IP="$(uci -q get drcom-auth.main.v6ip)"
-	UNBIND_FIRST="$(uci -q get drcom-auth.main.unbind_first)"
-	LOG_SUCCESS="$(uci -q get drcom-auth.main.log_success)"
+    if command -v uci >/dev/null 2>&1 && uci -q get drcom-auth.@main[0] >/dev/null 2>&1; then
+        ENABLED="$(uci -q get drcom-auth.@main[0].enabled)"
+        AUTH_IF="$(uci -q get drcom-auth.@main[0].auth_if)"
+        WAN_MAC="$(uci -q get drcom-auth.@main[0].wan_mac)"
+        GATEWAY_HOST="$(uci -q get drcom-auth.@main[0].gateway_host)"
+        LOGIN_URL="$(uci -q get drcom-auth.@main[0].login_url)"
+        UNBIND_URL="$(uci -q get drcom-auth.@main[0].unbind_url)"
+        USERNAME="$(uci -q get drcom-auth.@main[0].username)"
+        PASSWORD="$(uci -q get drcom-auth.@main[0].password)"
+        CHECK_HTTP_URL="$(uci -q get drcom-auth.@main[0].check_http_url)"
+        CHECK_HTTP_URL_2="$(uci -q get drcom-auth.@main[0].check_http_url_2)"
+        CHECK_TIMEOUT="$(uci -q get drcom-auth.@main[0].check_timeout)"
+        SUCCESS_INTERVAL="$(uci -q get drcom-auth.@main[0].success_interval)"
+        FAIL_CONFIRM_DELAY="$(uci -q get drcom-auth.@main[0].fail_confirm_delay)"
+        UNBIND_DELAY="$(uci -q get drcom-auth.@main[0].unbind_delay)"
+        LOGIN_DELAY="$(uci -q get drcom-auth.@main[0].login_delay)"
+        RETRY_DELAY="$(uci -q get drcom-auth.@main[0].retry_delay)"
+        MAX_BACKOFF="$(uci -q get drcom-auth.@main[0].max_backoff)"
+        TERMINAL_TYPE="$(uci -q get drcom-auth.@main[0].terminal_type)"
+        JS_VERSION="$(uci -q get drcom-auth.@main[0].js_version)"
+        LANG_PRIMARY="$(uci -q get drcom-auth.@main[0].lang_primary)"
+        LANG_SECONDARY="$(uci -q get drcom-auth.@main[0].lang_secondary)"
+        R1="$(uci -q get drcom-auth.@main[0].r1)"
+        R2="$(uci -q get drcom-auth.@main[0].r2)"
+        R3="$(uci -q get drcom-auth.@main[0].r3)"
+        R6="$(uci -q get drcom-auth.@main[0].r6)"
+        PARA="$(uci -q get drcom-auth.@main[0].para)"
+        V6IP="$(uci -q get drcom-auth.@main[0].v6ip)"
+        MKKEY="$(uci -q get drcom-auth.@main[0].mkkey)"
+        UNBIND_FIRST="$(uci -q get drcom-auth.@main[0].unbind_first)"
+        INUSE_RETRY_DELAY="$(uci -q get drcom-auth.@main[0].inuse_retry_delay)"
+        MAX_INUSE_RETRIES="$(uci -q get drcom-auth.@main[0].max_inuse_retries)"
+        HTTP_STRICT_204="$(uci -q get drcom-auth.@main[0].http_strict_204)"
+        LOG_SUCCESS="$(uci -q get drcom-auth.@main[0].log_success)"
+        DEBUG="$(uci -q get drcom-auth.@main[0].debug)"
+    else
+        . "$CONFIG_FILE"
+    fi
 
-	[ -z "$enabled" ] && enabled=1
-	[ "$enabled" = "1" ] || return 2
+    : "${ENABLED:=1}"
+    : "${AUTH_IF:=eth0}"
+    : "${GATEWAY_HOST:=10.255.255.1}"
+    : "${LOGIN_URL:=http://10.255.255.1/drcom/login}"
+    : "${UNBIND_URL:=http://10.255.255.1:801/eportal/portal/mac/unbind}"
+    : "${CHECK_HTTP_URL:=http://connect.rom.miui.com/generate_204}"
+    : "${CHECK_HTTP_URL_2:=}"
+    : "${CHECK_TIMEOUT:=2}"
+    : "${SUCCESS_INTERVAL:=3}"
+    : "${FAIL_CONFIRM_DELAY:=0}"
+    : "${UNBIND_DELAY:=1}"
+    : "${LOGIN_DELAY:=1}"
+    : "${RETRY_DELAY:=5}"
+    : "${MAX_BACKOFF:=60}"
+    : "${INUSE_RETRY_DELAY:=1}"
+    : "${MAX_INUSE_RETRIES:=15}"
+    : "${TERMINAL_TYPE:=1}"
+    : "${JS_VERSION:=4.1.3}"
+    : "${LANG_PRIMARY:=zh-cn}"
+    : "${LANG_SECONDARY:=zh}"
+    : "${R1:=0}"
+    : "${R2:=}"
+    : "${R3:=0}"
+    : "${R6:=0}"
+    : "${PARA:=00}"
+    : "${V6IP:=}"
+    : "${MKKEY:=123456}"
+    : "${UNBIND_FIRST:=0}"
+    : "${HTTP_STRICT_204:=1}"
+    : "${LOG_SUCCESS:=0}"
+    : "${DEBUG:=0}"
 
-	[ -z "$AUTH_IF" ] && AUTH_IF=eth0
-	[ -z "$CHECK_TIMEOUT" ] && CHECK_TIMEOUT=5
-	[ -z "$SUCCESS_INTERVAL" ] && SUCCESS_INTERVAL=30
-	[ -z "$FAIL_CONFIRM_DELAY" ] && FAIL_CONFIRM_DELAY=2
-	[ -z "$UNBIND_DELAY" ] && UNBIND_DELAY=4
-	[ -z "$LOGIN_DELAY" ] && LOGIN_DELAY=5
-	[ -z "$MAX_BACKOFF" ] && MAX_BACKOFF=60
-	[ -z "$TERMINAL_TYPE" ] && TERMINAL_TYPE=1
-	[ -z "$JS_VERSION" ] && JS_VERSION=4.1.3
-	[ -z "$LANG_PRIMARY" ] && LANG_PRIMARY=zh-cn
-	[ -z "$LANG_SECONDARY" ] && LANG_SECONDARY=zh
-	[ -z "$R1" ] && R1=0
-	[ -z "$R3" ] && R3=0
-	[ -z "$R6" ] && R6=0
-	[ -z "$PARA" ] && PARA=00
-	[ -z "$UNBIND_FIRST" ] && UNBIND_FIRST=1
-	[ -z "$HTTP_STRICT_204" ] && HTTP_STRICT_204=1
+    [ "$ENABLED" = "1" ] || return 2
+    [ -n "$USERNAME" ] || { err "[boot] 用户名未配置"; return 1; }
+    [ -n "$PASSWORD" ] || { err "[boot] 密码未配置"; return 1; }
+    return 0
+}
 
-	[ -n "$WAN_MAC" ] || WAN_MAC="$(get_if_mac)"
-	return 0
+fetch_cmd() {
+    if command -v curl >/dev/null 2>&1; then echo curl; return 0; fi
+    if command -v uclient-fetch >/dev/null 2>&1; then echo uclient-fetch; return 0; fi
+    if command -v wget >/dev/null 2>&1; then echo wget; return 0; fi
+    return 1
+}
+
+FETCHER=""
+
+fetch_body() {
+    url="$1"
+    case "$FETCHER" in
+        curl) curl -fsL --max-time "$CHECK_TIMEOUT" "$url" 2>/dev/null ;;
+        uclient-fetch) uclient-fetch -qO- -T "$CHECK_TIMEOUT" "$url" 2>/dev/null ;;
+        wget) wget -qO- -T "$CHECK_TIMEOUT" "$url" 2>/dev/null ;;
+        *) return 1 ;;
+    esac
+}
+
+fetch_code() {
+    url="$1"
+    case "$FETCHER" in
+        curl) curl -sL -o /dev/null -w '%{http_code}' --max-time "$CHECK_TIMEOUT" "$url" 2>/dev/null ;;
+        uclient-fetch)
+            uclient-fetch -qS -O /dev/null -T "$CHECK_TIMEOUT" "$url" 2>&1 | awk '/^  HTTP\/|^HTTP\//{print $2; exit}'
+            ;;
+        wget)
+            wget -S -qO- -T "$CHECK_TIMEOUT" "$url" 2>&1 | awk '/^  HTTP\/|^HTTP\//{print $2; exit}'
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+rand_v() {
+    ns="$(date +%N 2>/dev/null)"
+    [ -n "$ns" ] || ns="$(date +%s)"
+    echo $(( (ns % 9000) + 1000 ))
+}
+
+trim_mac() {
+    echo "$1" | tr 'a-z:' 'A-Z' | tr -d ':'
+}
+
+get_wan_mac() {
+    if [ -n "$WAN_MAC" ]; then
+        trim_mac "$WAN_MAC"
+        return 0
+    fi
+    cat "/sys/class/net/$AUTH_IF/address" 2>/dev/null | tr 'a-z:' 'A-Z' | tr -d ':'
+}
+
+get_wan_ip() {
+    ip -4 addr show "$AUTH_IF" 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -n1
+}
+
+ip_to_int() {
+    ip="$1"
+    IFS=. read -r a b c d <<EOF
+$ip
+EOF
+    [ -n "$a" ] && [ -n "$b" ] && [ -n "$c" ] && [ -n "$d" ] || return 1
+    echo $((a*256*256*256 + b*256*256 + c*256 + d))
+}
+
+http_ok() {
+    url="$1"
+    [ -n "$url" ] || return 1
+    code="$(fetch_code "$url")"
+    if [ "$HTTP_STRICT_204" = "1" ]; then
+        if [ "$code" = "204" ]; then return 0; fi
+    else
+        if [ "$code" = "200" ] || [ "$code" = "204" ]; then return 0; fi
+    fi
+    [ "$DEBUG" = "1" ] && log "[dbg ] check url=$url code=${code:-timeout} pass=no"
+    return 1
 }
 
 internet_up() {
-	[ -n "$CHECK_HTTP_URL" ] || return 1
-	code="$(http_code "$CHECK_HTTP_URL")"
-	if [ "$HTTP_STRICT_204" = "1" ]; then
-		[ "$code" = "204" ] && return 0
-	else
-		[ -n "$code" ] && [ "$code" -ge 200 ] && [ "$code" -lt 400 ] && return 0
-	fi
-
-	if [ -n "$CHECK_HTTP_URL_2" ]; then
-		code="$(http_code "$CHECK_HTTP_URL_2")"
-		if [ "$HTTP_STRICT_204" = "1" ]; then
-			[ "$code" = "204" ] && return 0
-		else
-			[ -n "$code" ] && [ "$code" -ge 200 ] && [ "$code" -lt 400 ] && return 0
-		fi
-	fi
-	return 1
+    http_ok "$CHECK_HTTP_URL" && return 0
+    [ -n "$CHECK_HTTP_URL_2" ] && http_ok "$CHECK_HTTP_URL_2" && return 0
+    return 1
 }
 
 gateway_reachable() {
-	ping -c 1 -W 2 "$GATEWAY_HOST" >/dev/null 2>&1
-}
-
-build_login_url() {
-	v="$(rand_v)"
-	printf '%s?callback=dr1003&DDDDD=%s&upass=%s&0MKKey=%s&R1=%s&R2=%s&R3=%s&R6=%s&para=%s&v6ip=%s&terminal_type=%s&lang=%s&jsVersion=%s&v=%s&lang=%s' \
-		"$LOGIN_URL" "$(urlencode "$USERNAME")" "$(urlencode "$PASSWORD")" "$MKKEY" "$R1" "$R2" "$R3" "$R6" "$PARA" "$V6IP" "$TERMINAL_TYPE" "$LANG_PRIMARY" "$JS_VERSION" "$v" "$LANG_SECONDARY"
-}
-
-build_unbind_url() {
-	[ -n "$WAN_MAC" ] || WAN_MAC="$(get_if_mac)"
-	WAN_IP="$(get_if_ipv4)"
-	WAN_IP_INT="$(ip_to_int "$WAN_IP")"
-	v="$(rand_v)"
-	printf '%s?callback=dr1004&user_account=%s&wlan_user_mac=%s&wlan_user_ip=%s&jsVersion=%s&v=%s&lang=%s' \
-		"$UNBIND_URL" "$(urlencode "$USERNAME")" "$WAN_MAC" "$WAN_IP_INT" "$JS_VERSION" "$v" "$LANG_SECONDARY"
-}
-
-do_unbind() {
-	url="$(build_unbind_url)"
-	fetch_text "$url" >/dev/null
+    code="$(fetch_code "http://${GATEWAY_HOST}/")"
+    [ -n "$code" ]
 }
 
 do_login() {
-	url="$(build_login_url)"
-	fetch_text "$url" >/dev/null
+    v="$(rand_v)"
+    url="${LOGIN_URL}?callback=dr1003&DDDDD=${USERNAME}&upass=${PASSWORD}&0MKKey=${MKKEY}&R1=${R1}&R2=${R2}&R3=${R3}&R6=${R6}&para=${PARA}&v6ip=${V6IP}&terminal_type=${TERMINAL_TYPE}&lang=${LANG_PRIMARY}&jsVersion=${JS_VERSION}&v=${v}&lang=${LANG_SECONDARY}"
+
+    login_mac="$(get_wan_mac)"
+    login_ip="$(get_wan_ip)"
+    log "[try ] user=${USERNAME} mac=${login_mac:-N/A} ip=${login_ip:-N/A}"
+    if [ "$DEBUG" = "1" ]; then
+        safe_url=$(echo "$url" | sed 's/upass=[^&]*/upass=***/')
+        log "[dbg ] login_url=$safe_url"
+    fi
+
+    resp="$(fetch_body "$url" 2>/dev/null)"
+
+    if [ -z "$resp" ]; then
+        err "[try ] no_response (网关不可达或超时)"
+        write_state "login_fail" "无响应"
+        return 1
+    fi
+
+    [ "$DEBUG" = "1" ] && log "[dbg ] login_resp=$resp"
+
+    result="$(echo "$resp" | sed -n 's/.*"result":\(-\?[0-9]*\).*/\1/p')"
+    msga="$(echo "$resp" | sed -n 's/.*"msga":"\([^"]*\)".*/\1/p')"
+    msg="$(echo "$resp" | sed -n 's/.*"msg":\(-\?[0-9]*\).*/\1/p')"
+
+    if [ "$result" = "1" ]; then
+        log "[try ] result=new msga=${msga:-ok}"
+        write_state "login_ok" "新建会话 msga=${msga:-ok}"
+        return 0
+    fi
+
+    case "$msga" in
+        *online*|*already*|*"在线"*)
+            log "[try ] result=online msga=${msga}"
+            write_state "login_ok" "已在线 msga=${msga}"
+            return 3
+            ;;
+        *inuse*|*"login again"*|*busy*|*"再次"*|*"Too many"*|*"too many"*|*"Code 30"*|*frequent*|*Oppp*)
+            log "[try ] result=inuse msga=${msga}"
+            return 2
+            ;;
+    esac
+
+    err "[try ] result=reject result=${result:-?} msg=${msg:-?} msga=${msga:-} body=$(echo "$resp" | head -c 200)"
+    write_state "login_fail" "result=${result:-?} msga=${msga:-空}"
+    return 1
 }
 
-pow2_delay() {
-	n="$1"
-	d=5
-	i=1
-	while [ "$i" -lt "$n" ]; do
-		d=$((d * 2))
-		[ "$d" -ge "$MAX_BACKOFF" ] && { echo "$MAX_BACKOFF"; return; }
-		i=$((i + 1))
-	done
-	[ "$d" -gt "$MAX_BACKOFF" ] && d="$MAX_BACKOFF"
-	echo "$d"
+do_unbind() {
+    mac="$(get_wan_mac)"
+    ip="$(get_wan_ip)"
+    ip_int="$(ip_to_int "$ip")"
+    [ -n "$mac" ] || { err "[err ] unbind: 无法获取 WAN MAC"; return 1; }
+    [ -n "$ip" ] || { err "[err ] unbind: 无法获取 WAN IPv4"; return 1; }
+    [ -n "$ip_int" ] || { err "[err ] unbind: WAN IPv4 转 int 失败"; return 1; }
+
+    v="$(rand_v)"
+    url="${UNBIND_URL}?callback=dr1004&user_account=${USERNAME}&wlan_user_mac=${mac}&wlan_user_ip=${ip_int}&jsVersion=${JS_VERSION}&v=${v}&lang=${LANG_SECONDARY}"
+    [ "$DEBUG" = "1" ] && log "[dbg ] unbind_url=$url"
+    fetch_body "$url" >/dev/null 2>&1
 }
 
-run_test() {
-	echo "config=$CONFIG_FILE"
-	echo "fetcher=$FETCHER"
-	echo "auth_if=$AUTH_IF"
-	if gateway_reachable; then
-		echo "gateway_reachable=yes"
-	else
-		echo "gateway_reachable=no"
-	fi
-	echo "wan_mac=${WAN_MAC:-$(get_if_mac)}"
-	ip="$(get_if_ipv4)"
-	echo "wan_ip=$ip"
-	echo "wan_ip_int=$(ip_to_int "$ip")"
-	echo "check_http_url=$CHECK_HTTP_URL"
-	echo "strict_204=$HTTP_STRICT_204"
+print_urls() {
+    mac="$(get_wan_mac)"
+    ip="$(get_wan_ip)"
+    ip_int="$(ip_to_int "$ip")"
+    v="$(rand_v)"
+    echo "${LOGIN_URL}?callback=dr1003&DDDDD=${USERNAME}&upass=${PASSWORD}&0MKKey=${MKKEY}&R1=${R1}&R2=${R2}&R3=${R3}&R6=${R6}&para=${PARA}&v6ip=${V6IP}&terminal_type=${TERMINAL_TYPE}&lang=${LANG_PRIMARY}&jsVersion=${JS_VERSION}&v=${v}&lang=${LANG_SECONDARY}"
+    echo "${UNBIND_URL}?callback=dr1004&user_account=${USERNAME}&wlan_user_mac=${mac}&wlan_user_ip=${ip_int}&jsVersion=${JS_VERSION}&v=${v}&lang=${LANG_SECONDARY}"
+}
+
+sanity_test() {
+    echo "config=$CONFIG_FILE"
+    echo "fetcher=$FETCHER"
+    echo "auth_if=$AUTH_IF"
+    if gateway_reachable; then echo "gateway_reachable=yes"; else echo "gateway_reachable=no"; fi
+    echo "wan_mac=$(get_wan_mac)"
+    ip="$(get_wan_ip)"
+    echo "wan_ip=$ip"
+    echo "wan_ip_int=$(ip_to_int "$ip")"
+    echo "check_http_url=$CHECK_HTTP_URL"
+    echo "check_http_code=$(fetch_code "$CHECK_HTTP_URL")"
+}
+
+recover_network() {
+    log "[step] 开始恢复"
+    write_state "recovering" "开始恢复"
+
+    if [ "$UNBIND_FIRST" = "1" ]; then
+        log "[step] 首次解绑 (UNBIND_FIRST=1)"
+        do_unbind || log "[err ] unbind 异常 (忽略)"
+        sleep "$UNBIND_DELAY"
+    fi
+
+    attempt=0
+    unbind_fallback_done=0
+    stale_unbind_done=0
+    while :; do
+        attempt=$((attempt + 1))
+        log "[step] login attempt=${attempt}/${MAX_INUSE_RETRIES}"
+        do_login
+        rc=$?
+
+        if [ "$rc" = "0" ]; then
+            break
+        fi
+
+        if [ "$rc" = "3" ]; then
+            sleep "$LOGIN_DELAY"
+            if internet_up; then
+                log "[ok  ] 已在线且联网已通 attempts=${attempt}"
+                write_state "ok" "已在线且联网恢复成功"
+                return 0
+            fi
+            if [ "$stale_unbind_done" = "0" ]; then
+                log "[step] stale_session: unbind 后重登"
+                do_unbind || log "[err ] unbind 异常 (忽略)"
+                sleep "$UNBIND_DELAY"
+                stale_unbind_done=1
+                continue
+            fi
+            err "[fail] stale unbind 后仍未联网"
+            write_state "failed" "stale unbind 后仍未联网"
+            return 1
+        fi
+
+        if [ "$rc" = "1" ]; then
+            err "[fail] 登录被拒(非占用)"
+            write_state "failed" "登录被拒"
+            return 1
+        fi
+
+        # rc=2: 占用
+        if [ "$attempt" -ge "$MAX_INUSE_RETRIES" ]; then
+            if [ "$unbind_fallback_done" = "0" ]; then
+                log "[step] 兜底 unbind+重登 (inuse>=${MAX_INUSE_RETRIES})"
+                do_unbind || log "[err ] unbind 异常 (忽略)"
+                sleep "$UNBIND_DELAY"
+                unbind_fallback_done=1
+                attempt=$((MAX_INUSE_RETRIES - 1))
+                continue
+            fi
+            err "[fail] 兜底 unbind 后仍占用"
+            write_state "failed" "兜底后仍占用"
+            return 1
+        fi
+
+        sleep "$INUSE_RETRY_DELAY"
+    done
+
+    sleep "$LOGIN_DELAY"
+    if internet_up; then
+        log "[ok  ] 联网已通 attempts=${attempt}"
+        write_state "ok" "网络恢复成功"
+        return 0
+    fi
+
+    err "[fail] 登录成功但联网未通"
+    write_state "failed" "登录成功但联网未通"
+    return 1
 }
 
 run_once() {
-	if internet_up; then
-		[ "$LOG_SUCCESS" = "1" ] && log "网络正常"
-		return 0
-	fi
+    if internet_up; then
+        [ "$LOG_SUCCESS" = "1" ] && log "[ok  ] 网络正常"
+        write_state "ok" "网络正常"
+        return 0
+    fi
 
-	sleep "$FAIL_CONFIRM_DELAY"
-	if internet_up; then
-		[ "$LOG_SUCCESS" = "1" ] && log "网络正常"
-		return 0
-	fi
+    if [ "$FAIL_CONFIRM_DELAY" -gt 0 ] 2>/dev/null; then
+        sleep "$FAIL_CONFIRM_DELAY"
+        if internet_up; then
+            [ "$LOG_SUCCESS" = "1" ] && log "[ok  ] 网络正常"
+            write_state "ok" "网络正常"
+            return 0
+        fi
+    fi
 
-	log "检测到网络异常，开始恢复"
-
-	if [ "$UNBIND_FIRST" = "1" ]; then
-		log "执行解绑"
-		do_unbind
-		sleep "$UNBIND_DELAY"
-	fi
-
-	log "执行登录"
-	do_login
-	sleep "$LOGIN_DELAY"
-
-	if internet_up; then
-		log "网络恢复成功"
-		return 0
-	fi
-
-	log "恢复失败，稍后重试"
-	return 1
+    recover_network
+    return $?
 }
 
-main_loop() {
-	fail_count=0
-	log "校园网认证服务已启动（接口：$AUTH_IF）"
-	while :; do
-		if run_once; then
-			fail_count=0
-			sleep "$SUCCESS_INTERVAL"
-		else
-			fail_count=$((fail_count + 1))
-			delay="$(pow2_delay "$fail_count")"
-			log "${delay}秒后重试"
-			sleep "$delay"
-		fi
-	done
+run_loop() {
+    fail_count=0
+    log "[boot] 服务启动 if=${AUTH_IF}"
+    write_state "started" "服务已启动"
+
+    while true; do
+        if run_once; then
+            fail_count=0
+            sleep "$SUCCESS_INTERVAL"
+        else
+            fail_count=$((fail_count + 1))
+            delay=$((RETRY_DELAY * fail_count))
+            [ "$delay" -gt "$MAX_BACKOFF" ] && delay="$MAX_BACKOFF"
+            log "[wait] retry_in=${delay}s"
+            write_state "retry" "${delay}秒后重试"
+            sleep "$delay"
+        fi
+    done
 }
 
 main() {
-	mode="loop"
-	while [ $# -gt 0 ]; do
-		case "$1" in
-			--once) mode="once" ;;
-			--test) mode="test" ;;
-			--print-urls) mode="print" ;;
-			*) ;;
-		esac
-		shift
-	done
+    mode="loop"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --once) mode="once" ;;
+            --test) mode="test" ;;
+            --print-urls) mode="print_urls" ;;
+            --debug) DEBUG=1 ;;
+        esac
+        shift
+    done
 
-	load_config || exit 1
-	FETCHER="$(fetch_cmd)" || { echo "no fetcher found" >&2; exit 1; }
+    load_config
+    rc=$?
+    [ "$rc" = "2" ] && exit 0
+    [ "$rc" = "0" ] || exit 1
 
-	if [ "$mode" = "test" ]; then
-		run_test
-		exit 0
-	fi
+    FETCHER="$(fetch_cmd)" || { err "[boot] 未找到 curl / uclient-fetch / wget"; exit 1; }
 
-	if [ "$mode" = "print" ]; then
-		echo "unbind_url=$(build_unbind_url)"
-		echo "login_url=$(build_login_url)"
-		exit 0
-	fi
-
-	if [ "$mode" = "once" ]; then
-		run_once
-		exit $?
-	fi
-
-	mkdir "$LOCKDIR" 2>/dev/null || exit 0
-	trap 'rmdir "$LOCKDIR" 2>/dev/null' EXIT INT TERM
-	main_loop
+    case "$mode" in
+        test) sanity_test; exit $? ;;
+        print_urls) print_urls; exit $? ;;
+        once) run_once; exit $? ;;
+        loop)
+            acquire_lock || exit 1
+            run_loop
+            ;;
+    esac
 }
 
 main "$@"

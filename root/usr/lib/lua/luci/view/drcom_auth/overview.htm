@@ -1,50 +1,61 @@
 <%+header%>
+<style>
+.drcom-card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:16px;margin-bottom:16px}
+.drcom-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.drcom-k{color:#666;font-size:12px}
+.drcom-v{font-size:16px;font-weight:600;margin-top:4px}
+.drcom-ok{color:#0a7d2c}.drcom-bad{color:#b42318}
+textarea.drcom-log{width:100%;min-height:320px;font-family:monospace}
+.drcom-actions button{margin-right:8px;margin-bottom:8px}
+</style>
+
 <h2>校园网认证</h2>
 
-<div class="cbi-map">
-	<div class="cbi-section">
-		<table class="table">
-			<tr><td width="180">服务状态</td><td><%=pcdata(service or "unknown")%></td></tr>
-			<tr><td>进程</td><td><pre><%=pcdata(ps or "")%></pre></td></tr>
-			<tr><td>WAN IP</td><td><%=pcdata(wan_ip or "")%></td></tr>
-			<tr><td>WAN MAC</td><td><%=pcdata(wan_mac or "")%></td></tr>
-			<tr><td>网关连通性</td><td><%=pcdata(gateway or "")%></td></tr>
-		</table>
-	</div>
-
-	<div class="cbi-section">
-		<div class="right">
-			<form method="post" action="<%=url('admin/services/drcom_auth/action')%>" style="display:inline">
-				<input type="hidden" name="do" value="start" />
-				<input class="btn cbi-button cbi-button-apply" type="submit" value="启动服务" />
-			</form>
-			<form method="post" action="<%=url('admin/services/drcom_auth/action')%>" style="display:inline">
-				<input type="hidden" name="do" value="stop" />
-				<input class="btn cbi-button cbi-button-reset" type="submit" value="停止服务" />
-			</form>
-			<form method="post" action="<%=url('admin/services/drcom_auth/action')%>" style="display:inline">
-				<input type="hidden" name="do" value="restart" />
-				<input class="btn cbi-button cbi-button-save" type="submit" value="重启服务" />
-			</form>
-			<form method="post" action="<%=url('admin/services/drcom_auth/action')%>" style="display:inline">
-				<input type="hidden" name="do" value="once" />
-				<input class="btn cbi-button cbi-button-apply" type="submit" value="立即检测一次" />
-			</form>
-			<form method="post" action="<%=url('admin/services/drcom_auth/action')%>" style="display:inline">
-				<input type="hidden" name="do" value="test" />
-				<input class="btn cbi-button" type="submit" value="运行自检" />
-			</form>
-			<form method="post" action="<%=url('admin/services/drcom_auth/action')%>" style="display:inline">
-				<input type="hidden" name="do" value="print" />
-				<input class="btn cbi-button" type="submit" value="显示请求 URL" />
-			</form>
-		</div>
-	</div>
-
-	<div class="cbi-section">
-		<h3>最近日志</h3>
-		<pre style="white-space:pre-wrap; max-height:500px; overflow:auto;"><%=pcdata(logs or "")%></pre>
-	</div>
+<div class="drcom-card">
+  <div class="drcom-grid">
+    <div><div class="drcom-k">服务状态</div><div class="drcom-v"><%=running%></div></div>
+    <div><div class="drcom-k">认证接口</div><div class="drcom-v"><%=auth_if%></div></div>
+    <div><div class="drcom-k">WAN IP</div><div class="drcom-v"><%=wan_ip ~= "" and wan_ip or "-"%></div></div>
+    <div><div class="drcom-k">WAN MAC</div><div class="drcom-v"><%=wan_mac ~= "" and wan_mac or "-"%></div></div>
+    <div><div class="drcom-k">网关状态</div><div class="drcom-v <%=gateway_ok=="可达" and "drcom-ok" or "drcom-bad"%>"><%=gateway_ok%></div></div>
+    <div><div class="drcom-k">外网检测</div><div class="drcom-v <%=internet_ok=="正常" and "drcom-ok" or "drcom-bad"%>"><%=internet_ok%></div></div>
+    <div><div class="drcom-k">最近时间</div><div class="drcom-v"><%=state.last_time or "-"%></div></div>
+    <div><div class="drcom-k">最近状态</div><div class="drcom-v"><%=state.last_status or "-"%></div></div>
+  </div>
+  <div style="margin-top:12px" class="drcom-k">最近消息：<strong><%=state.last_message or "-"%></strong></div>
 </div>
 
+<div class="drcom-card drcom-actions">
+  <button class="cbi-button cbi-button-apply" onclick="execOp('start')">启动</button>
+  <button class="cbi-button cbi-button-reset" onclick="execOp('stop')">停止</button>
+  <button class="cbi-button cbi-button-apply" onclick="execOp('restart')">重启</button>
+  <button class="cbi-button cbi-button-action important" onclick="execOp('once')">立即检测一次</button>
+  <button class="cbi-button cbi-button-action" onclick="execOp('test')">运行自检</button>
+  <button class="cbi-button cbi-button-action" onclick="execOp('urls')">显示请求 URL</button>
+  <pre id="drcom-output" style="white-space:pre-wrap;margin-top:12px"></pre>
+</div>
+
+<div class="drcom-card">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+    <strong>运行日志（最近 200 行）</strong>
+    <button class="cbi-button cbi-button-action" onclick="loadLogs()">刷新日志</button>
+  </div>
+  <textarea id="drcom-log" class="drcom-log" readonly></textarea>
+</div>
+
+<script>
+function execOp(op){
+  fetch('<%=luci.dispatcher.build_url("admin","services","drcom_auth","action")%>?op=' + encodeURIComponent(op), {credentials:'same-origin'})
+    .then(r => r.json())
+    .then(d => { document.getElementById('drcom-output').textContent = d.output || '已执行'; setTimeout(loadLogs, 500); })
+    .catch(e => { document.getElementById('drcom-output').textContent = String(e); });
+}
+function loadLogs(){
+  fetch('<%=luci.dispatcher.build_url("admin","services","drcom_auth","logs")%>?n=200', {credentials:'same-origin'})
+    .then(r => r.text())
+    .then(t => { document.getElementById('drcom-log').value = t; });
+}
+loadLogs();
+setInterval(loadLogs, 5000);
+</script>
 <%+footer%>
